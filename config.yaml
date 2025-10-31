@@ -1,0 +1,88 @@
+# Configuration file for Glasgow Coma Scale VLM Evaluation
+
+# OpenAI API Configuration
+openai:
+  api_key: ${OPENAI_API_KEY}   
+  base_url: null  
+  timeout: 60   
+
+# Models to evaluate
+models:
+  #- name: "gpt-5-2025-08-07"
+  #  parameters:
+  #    top_p: 1.0
+
+ #  - name: "gpt-5-mini-2025-08-07"
+  #   parameters:
+   #    top_p: 1.0
+ 
+  - name: "gpt-4.1-2025-04-14"
+    parameters:
+      top_p: 1.0
+
+
+ #  - name: "gpt-5-pro-2025-10-06"
+   #  parameters:
+    #   top_p: 1.0
+ #  - name: "gpt-5-nano-2025-08-07"
+  #   parameters:
+     #  top_p: 1.0
+ #  - name: "gpt-realtime-2025-08-28"
+  #   parameters:
+   #   top_p: 1.0
+ 
+ # - name: "ChatGPT-4o-latest"
+  #   parameters:
+   #    top_p: 1.0
+ 
+# Dataset configuration
+dataset:
+  base_path: "trauma_dataset"
+  categories:
+    - name: "1_no_response"
+      gcs_motor_score: 1
+      description: "No response to painful stimuli"
+    - name: "2_extension"
+      gcs_motor_score: 2
+      description: "Abnormal extension (decerebrate posturing)"
+    - name: "3_abnormal_flexion"
+      gcs_motor_score: 3
+      description: "Abnormal flexion (decorticate posturing)"
+    - name: "4_normal_flexion"
+      gcs_motor_score: 4
+      description: "Withdrawal/flexion from pain"
+    - name: "5_localizing"
+      gcs_motor_score: 5
+      description: "Localizes to pain"
+    - name: "6_obeys_commands"
+      gcs_motor_score: 6
+      description: "Obeys commands"
+
+# Prompting templates
+prompting:
+  zero_shot_template: "prompts/zero_shot_gcs.j2"
+  few_shot_template: "prompts/few_shot_gcs.j2"
+  zero_shot_3bin_template: "prompts/zero_shot_gcs_3bin.j2"
+  few_shot_3bin_template: "prompts/few_shot_gcs_3bin.j2"
+  image_detail: "high"  # one of: low | high | auto
+
+# Few-shot configuration
+few_shot:
+  enabled: true
+  examples_per_category: 1  # Number of example images to include per category
+  random_seed: 42  # For reproducible example selection
+
+# Eval settings
+evaluation:
+  output_dir: "results"
+  save_individual_responses: true
+  save_summary: true
+  generate_plots: true  # Generate visualization plots
+  format: "json"  # json or csv
+  logging:
+    enabled: true
+    dir: "logs"
+    file_prefix: "llm_interactions"
+    redact_base64_images: true  # replace base64 with a length note
+    truncate_response_chars: 2000  # limit response text length in logs
+

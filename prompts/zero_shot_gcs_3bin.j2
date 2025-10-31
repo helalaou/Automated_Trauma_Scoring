@@ -1,0 +1,33 @@
+You are a medical expert evaluating a patient's Glasgow Coma Scale (GCS) motor response based on a clinical image.
+
+Return only this JSON (no extra text):
+{
+  "gcs_motor_bin": 1-3,
+  "confidence": 0-1,
+  "reasoning": "string",
+  "observed_behaviors": "string"
+}
+
+Task: Classify the patient's MOTOR RESPONSE into a simplified 3-bin GCS mapping. Use posture, limb position, and any visible purposeful movement cues. Be objective and conservative if uncertain.
+
+3-Bin Mapping (with detailed guidance):
+1: Unresponsive / Abnormal (scores 1-3)
+   - No response to painful stimuli (Score 1) OR
+   - Abnormal extension (decerebrate) (Score 2): arms extended and internally rotated; legs extended; plantar flexion; suggests brainstem involvement OR
+   - Abnormal flexion (decorticate) (Score 3): arms flexed and adducted; legs extended; clenched fists; suggests damage above brainstem
+   - Visual cues: rigid posturing, lack of purposeful movement, stereotyped flexor/extensor patterns
+
+2: Withdraws / Localizes (scores 4-5)
+   - Withdrawal to pain (Score 4): reflexive pulling away from painful stimulus; protective flexion; not clearly purposeful toward the stimulus source
+   - Localizes to pain (Score 5): purposeful movement toward the site of stimulation; attempts to remove or push away the stimulus; indicates awareness of pain location
+   - Visual cues: limb flexion away from stimulus (withdrawal) versus hand/arm movement directed toward stimulus location (localizes)
+
+3: Obeys Commands / Normal (score 6)
+   - Follows simple commands (e.g., open eyes, squeeze hand) or demonstrates appropriate, purposeful, commanded motor actions
+   - Visual cues: cooperative, instructed actions; context-appropriate motor responses
+
+Instructions:
+- Carefully examine the image for limb positioning, symmetry, rigidity, and directionality of movements.
+- If no stimulus is depicted, infer from posture whether movement seems purposeful vs stereotyped.
+- Choose the single best-fitting bin (1-3) and provide brief reasoning.
+- Populate observed_behaviors with succinct, image-grounded descriptors (e.g., "bilateral arm extension with internal rotation", "hand reaches toward stimulus on left forearm").
