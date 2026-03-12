@@ -61,16 +61,18 @@ dataset:
 # Prompting templates
 prompting:
   zero_shot_template: "prompts/zero_shot_gcs.j2"
-  few_shot_template: "prompts/few_shot_gcs.j2"
   zero_shot_3bin_template: "prompts/zero_shot_gcs_3bin.j2"
-  few_shot_3bin_template: "prompts/few_shot_gcs_3bin.j2"
   image_detail: "high"  # one of: low | high | auto
 
-# Few-shot configuration
-few_shot:
+# OpenPose processing configuration
+openpose:
   enabled: true
-  examples_per_category: 1  # Number of example images to include per category
-  random_seed: 42  # For reproducible example selection
+  binary_path: null  # Use PATH lookup when null
+  model_folder: null  # Set if your OpenPose install requires explicit model path
+  output_dir: "pose_cache"
+  reuse_cache: true
+  min_confidence: 0.2
+  strict: true
 
 # Eval settings
 evaluation:

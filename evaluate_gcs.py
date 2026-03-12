@@ -10,7 +10,6 @@ import os
 import json
 import yaml
 import base64
-import random
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from datetime import datetime
@@ -28,6 +27,8 @@ import numpy as np
 import pandas as pd
 
 from openai import OpenAI
+
+from pose_processor import OpenPoseProcessor, PoseProcessingError
 
 # Set plotting style
 sns.set_style("whitegrid")
@@ -59,6 +60,14 @@ class GCSEvaluator:
             self.log_file = None
             self.redact_base64 = False
             self.truncate_chars = 0
+
+        pose_config = self.config.get("openpose", {})
+        if not pose_config.get("enabled", True):
+            raise RuntimeError("OpenPose must be enabled to run the evaluation pipeline.")
+        try:
+            self.pose_processor = OpenPoseProcessor(pose_config, self.dataset_path)
+        except PoseProcessingError as exc:
+            raise RuntimeError(f"Failed to initialize OpenPose processor: {exc}") from exc
 
     def _maybe_redact_messages(self, messages: List[Dict]) -> List[Dict]:
         if not self.redact_base64:
@@ -149,13 +158,18 @@ class GCSEvaluator:
         """Load configuration from YAML file."""
         with open(config_path, 'r') as f:
             config = yaml.safe_load(f)
-        
-        # Handle environment variable substitution
-        if config.get("openai", {}).get("api_key", "").startswith("${"):
-            env_var = config["openai"]["api_key"][2:-1]
-            config["openai"]["api_key"] = os.getenv(env_var, "")
-        
-        return config
+
+        return self._expand_env_vars(config)
+
+    def _expand_env_vars(self, value):
+        if isinstance(value, dict):
+            return {k: self._expand_env_vars(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [self._expand_env_vars(v) for v in value]
+        if isinstance(value, str) and value.startswith("${") and value.endswith("}"):
+            env_var = value[2:-1]
+            return os.getenv(env_var, "")
+        return value
     
     def _initialize_openai_client(self) -> OpenAI:
         """Initialize OpenAI client."""
@@ -208,136 +222,62 @@ class GCSEvaluator:
         
         return image_files
     
-    def _select_few_shot_examples(self, exclude_path: Optional[Path] = None) -> List[Tuple[Path, Dict]]:
-        """Select example images for few-shot prompting."""
-        examples_per_category = self.config["few_shot"]["examples_per_category"]
-        random_seed = self.config["few_shot"]["random_seed"]
-        
-        random.seed(random_seed)
-        examples = []
-        
-        for category in self.config["dataset"]["categories"]:
-            category_path = self.dataset_path / category["name"]
-            if not category_path.exists():
-                continue
-            
-            # Get all image files in category
-            category_images = []
-            for ext in ['*.png', '*.jpg', '*.jpeg', '*.PNG', '*.JPG', '*.JPEG']:
-                category_images.extend(category_path.glob(ext))
-            
-            # Exclude the current image if provided
-            if exclude_path:
-                category_images = [img for img in category_images if img != exclude_path]
-            
-            # Randomly select examples
-            selected = random.sample(
-                category_images, 
-                min(examples_per_category, len(category_images))
-            )
-            
-            for img_path in selected:
-                examples.append((img_path, category))
-        
-        random.seed()  # Reset seed
-        return examples
-    
-    def _create_few_shot_content(self, examples: List[Tuple[Path, Dict]]) -> str:
-        """Create few-shot example content for the prompt."""
-        example_texts = []
-        
-        for idx, (img_path, category) in enumerate(examples, 1):
-            example_texts.append(
-                f"Example {idx}: GCS Motor Score {category['gcs_motor_score']} - {category['description']}\n"
-                f"(See image {idx} below)\n"
-            )
-        
-        return "\n".join(example_texts)
-    
-    def _create_messages(self, image_path: Path, use_few_shot: bool = False, task: str = "6bin") -> List[Dict]:
-        """Create messages for API call.
-        task: '6bin' uses standard prompts; '3bin' uses 3-bin templates.
-        """
-        base64_image, base_mime = self._encode_image(image_path)
-        
-        if use_few_shot:
-            template_key = "few_shot_3bin_template" if task == "3bin" else "few_shot_template"
-            template_path = Path(self.config["prompting"][template_key])
-            examples = self._select_few_shot_examples(exclude_path=image_path)
-            few_shot_examples = self._create_few_shot_content(examples)
-            with open(template_path, 'r') as tf:
-                from jinja2 import Template
-                prompt = Template(tf.read()).render(few_shot_examples=few_shot_examples)
-            
-            content = [{"type": "text", "text": prompt}]
-            
-            for idx, (img_path, category) in enumerate(examples, 1):
-                example_base64, example_mime = self._encode_image(img_path)
-                content.append({
-                    "type": "text",
-                    "text": f"\n[Example Image {idx} - GCS Motor Score {category['gcs_motor_score']}: {category['description']}]"
-                })
-                content.append({
-                    "type": "image_url",
-                    "image_url": {
-                        "url": f"data:{example_mime};base64,{example_base64}",
-                        "detail": self.config.get("prompting", {}).get("image_detail", "auto")
-                    }
-                })
-            
-            content.append({
-                "type": "text",
-                "text": "\n\nNow evaluate the following test image:"
-            })
-            content.append({
+    def _create_messages(self, image_path: Path, task: str = "6bin") -> Tuple[List[Dict], Dict]:
+        """Create messages for API call using OpenPose-derived skeleton imagery."""
+        pose_context: Dict[str, object] = {}
+
+        try:
+            pose_repr = self.pose_processor.generate(image_path)
+            image_payload = {
+                "type": "image_url",
+                "image_url": {
+                    "url": f"data:{pose_repr.mime_type};base64,{pose_repr.base64_image}",
+                    "detail": self.config.get("prompting", {}).get("image_detail", "auto")
+                }
+            }
+            pose_context = {
+                "pose_summary": pose_repr.summary_text,
+                "pose_metadata": pose_repr.metadata,
+            }
+        except PoseProcessingError as exc:
+            base64_image, base_mime = self._encode_image(image_path)
+            warning = f"OpenPose failed for {image_path.name}: {exc}. Falling back to raw image."
+            print(f"  ! {warning}")
+            pose_context = {
+                "pose_error": str(exc),
+                "pose_summary": "Pose extraction failed; raw clinical image provided instead.",
+            }
+            image_payload = {
                 "type": "image_url",
                 "image_url": {
                     "url": f"data:{base_mime};base64,{base64_image}",
                     "detail": self.config.get("prompting", {}).get("image_detail", "auto")
                 }
-            })
-            
-            messages = [
-                {
-                    "role": "system",
-                    "content": [
-                        {"type": "text", "text": "Return one JSON object only: {\n  gcs_motor_score: 1-6,\n  confidence: 0-1,\n  reasoning: string,\n  observed_behaviors: string\n}"}
-                    ]
-                },
-                {
-                    "role": "user",
-                    "content": content
-                }
-            ]
-        else:
-            template_key = "zero_shot_3bin_template" if task == "3bin" else "zero_shot_template"
-            template_path = Path(self.config["prompting"][template_key])
-            with open(template_path, 'r') as tf:
-                from jinja2 import Template
-                prompt = Template(tf.read()).render()
-            messages = [
-                {
-                    "role": "system",
-                    "content": [
-                        {"type": "text", "text": "Return one JSON object only: {\n  gcs_motor_score: 1-6,\n  confidence: 0-1,\n  reasoning: string,\n  observed_behaviors: string\n}"}
-                    ]
-                },
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt},
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:{base_mime};base64,{base64_image}",
-                                "detail": self.config.get("prompting", {}).get("image_detail", "auto")
-                            }
-                        }
-                    ]
-                }
-            ]
-        
-        return messages
+            }
+
+        template_key = "zero_shot_3bin_template" if task == "3bin" else "zero_shot_template"
+        template_path = Path(self.config["prompting"][template_key])
+        with open(template_path, 'r') as tf:
+            from jinja2 import Template
+            prompt = Template(tf.read()).render(pose_summary=pose_context.get("pose_summary", ""))
+
+        messages = [
+            {
+                "role": "system",
+                "content": [
+                    {"type": "text", "text": "Return one JSON object only: {\n  gcs_motor_score: 1-6,\n  confidence: 0-1,\n  reasoning: string,\n  observed_behaviors: string\n}"}
+                ]
+            },
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    image_payload
+                ]
+            }
+        ]
+
+        return messages, pose_context
     
     def _call_model(self, model_name: str, messages: List[Dict], model_params: Dict) -> Dict:
         """Call OpenAI API with specified model and parameters.
@@ -417,14 +357,14 @@ class GCSEvaluator:
         except Exception as e:
             return {"error": f"JSON parse error: {str(e)}", "raw_response": text}
     
-    def evaluate(self, use_few_shot: bool = False, task: str = "6bin") -> Dict:
-        """Run evaluation on all images."""
+    def evaluate(self, task: str = "6bin") -> List[Dict]:
+        """Run evaluation on all images using OpenPose skeleton inputs."""
         image_files = self._get_image_files()
         all_results = []
         
         print(f"\n{'='*60}")
         print(f"Starting GCS Evaluation ({task})")
-        print(f"Mode: {'Few-Shot' if use_few_shot else 'Zero-Shot'}")
+        print("Input Modality: OpenPose skeleton renderings")
         print(f"Total images: {len(image_files)}")
         print(f"Models: {[m['name'] for m in self.config['models']]}")
         print(f"{'='*60}\n")
@@ -434,7 +374,7 @@ class GCSEvaluator:
             print(f"  Category: {category['name']} (Expected Score: {category['gcs_motor_score']})")
             
             # Create messages
-            messages = self._create_messages(image_path, use_few_shot=use_few_shot, task=task)
+            messages, pose_context = self._create_messages(image_path, task=task)
             
             # Evaluate with each model
             for model_config in self.config["models"]:
@@ -453,9 +393,10 @@ class GCSEvaluator:
                         "category": category["name"],
                         "expected_score": category["gcs_motor_score"],
                         "model": model_name,
-                        "prompting_mode": "few_shot" if use_few_shot else "zero_shot",
+                        "prompting_mode": "openpose",
                         "success": False,
-                        "error": api_result["error"]
+                        "error": api_result["error"],
+                        **pose_context
                     }
                 else:
                     # Parse response
@@ -508,7 +449,7 @@ class GCSEvaluator:
                         "expected_score": category["gcs_motor_score"],
                         "expected_score_3bin": expected_3bin,
                         "model": model_name,
-                        "prompting_mode": "few_shot" if use_few_shot else "zero_shot",
+                        "prompting_mode": "openpose",
                         "success": True,
                         "predicted_score": predicted_score,
                         "predicted_score_3bin": predicted_3bin,
@@ -518,7 +459,8 @@ class GCSEvaluator:
                         "reasoning": parsed.get("reasoning"),
                         "observed_behaviors": parsed.get("observed_behaviors"),
                         "raw_response": api_result["response"],
-                        "usage": api_result["usage"]
+                        "usage": api_result["usage"],
+                        **pose_context
                     }
                 
                 all_results.append(result)
@@ -611,14 +553,14 @@ class GCSEvaluator:
         
         return metrics
     
-    def save_results(self, results: List[Dict], use_few_shot: bool = False, task: str = "6bin"):
+    def save_results(self, results: List[Dict], task: str = "6bin"):
         """Save evaluation results."""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        mode = "few_shot" if use_few_shot else "zero_shot"
+        mode = "openpose"
         
         # Save individual results
         if self.config["evaluation"]["save_individual_responses"]:
-            results_file = self.results_dir / f"results_{mode}_{timestamp}.json"
+            results_file = self.results_dir / f"results_{mode}_{task}_{timestamp}.json"
             with open(results_file, 'w') as f:
                 json.dump(results, f, indent=2)
             print(f"\nResults saved to: {results_file}")
@@ -633,7 +575,7 @@ class GCSEvaluator:
                 "metrics": metrics
             }
             
-            summary_file = self.results_dir / f"summary_{mode}_{timestamp}.json"
+            summary_file = self.results_dir / f"summary_{mode}_{task}_{timestamp}.json"
             with open(summary_file, 'w') as f:
                 json.dump(summary, f, indent=2)
             
@@ -657,9 +599,9 @@ class GCSEvaluator:
                 for bin_name, bin_metrics in model_metrics['bin_3_accuracies'].items():
                     print(f"    {bin_name}: {bin_metrics['accuracy']:.2%} ({bin_metrics['correct']}/{bin_metrics['total']})")
             
-    def _plot_results(self, results: List[Dict], metrics: Dict, use_few_shot: bool, timestamp: str):
+    def _plot_results(self, results: List[Dict], metrics: Dict, timestamp: str):
         """Generate visualization plots for evaluation results."""
-        mode = "few_shot" if use_few_shot else "zero_shot"
+        mode = "openpose"
         plots_dir = self.results_dir / "plots"
         plots_dir.mkdir(exist_ok=True)
         
@@ -845,87 +787,6 @@ class GCSEvaluator:
         plt.close()
 
 
-    def plot_comparison(self, zero_shot_results: List[Dict], few_shot_results: List[Dict]):
-        """Compare zero-shot vs few-shot results for both 6-bin and 3-bin systems."""
-        zero_metrics = self._calculate_metrics(zero_shot_results)
-        few_metrics = self._calculate_metrics(few_shot_results)
-        
-        plots_dir = self.results_dir / "plots"
-        plots_dir.mkdir(exist_ok=True)
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        
-        models = list(zero_metrics.keys())
-        if not models:
-            print("No models found for comparison")
-            return
-        
-        # 6-bin comparison
-        fig, ax = plt.subplots(figsize=(12, 6))
-        x = np.arange(len(models))
-        width = 0.35
-        
-        zero_acc_6bin = [zero_metrics[m]["accuracy"] for m in models]
-        few_acc_6bin = [few_metrics[m]["accuracy"] for m in models]
-        
-        bars1 = ax.bar(x - width/2, zero_acc_6bin, width, label='Zero-Shot', alpha=0.8, color='#3498db')
-        bars2 = ax.bar(x + width/2, few_acc_6bin, width, label='Few-Shot', alpha=0.8, color='#2ecc71')
-        
-        ax.set_ylabel('Accuracy', fontsize=12)
-        ax.set_xlabel('Model', fontsize=12)
-        ax.set_title('Zero-Shot vs Few-Shot Accuracy Comparison (6-bin)', fontsize=14, fontweight='bold')
-        ax.set_xticks(x)
-        ax.set_xticklabels(models, rotation=45, ha='right')
-        ax.set_ylim(0, 1.1)
-        ax.set_yticks(np.arange(0, 1.1, 0.1))
-        ax.set_yticklabels([f'{x:.0%}' for x in np.arange(0, 1.1, 0.1)])
-        ax.legend()
-        ax.grid(axis='y', alpha=0.3)
-        
-        # Add value labels
-        for bars in [bars1, bars2]:
-            for bar in bars:
-                height = bar.get_height()
-                ax.text(bar.get_x() + bar.get_width()/2., height + 0.02,
-                       f'{height:.1%}', ha='center', va='bottom', fontsize=9)
-        
-        plt.tight_layout()
-        plt.savefig(plots_dir / f"comparison_zero_vs_few_6bin_{timestamp}.png", dpi=300, bbox_inches='tight')
-        plt.close()
-        print(f"6-bin comparison plot saved to: {plots_dir / f'comparison_zero_vs_few_6bin_{timestamp}.png'}")
-        
-        # 3-bin comparison
-        fig, ax = plt.subplots(figsize=(12, 6))
-        x = np.arange(len(models))
-        width = 0.35
-        
-        zero_acc_3bin = [zero_metrics[m]["accuracy_3bin"] for m in models]
-        few_acc_3bin = [few_metrics[m]["accuracy_3bin"] for m in models]
-        
-        bars1 = ax.bar(x - width/2, zero_acc_3bin, width, label='Zero-Shot', alpha=0.8, color='#3498db')
-        bars2 = ax.bar(x + width/2, few_acc_3bin, width, label='Few-Shot', alpha=0.8, color='#2ecc71')
-        
-        ax.set_ylabel('Accuracy', fontsize=12)
-        ax.set_xlabel('Model', fontsize=12)
-        ax.set_title('Zero-Shot vs Few-Shot Accuracy Comparison (3-bin)', fontsize=14, fontweight='bold')
-        ax.set_xticks(x)
-        ax.set_xticklabels(models, rotation=45, ha='right')
-        ax.set_ylim(0, 1.1)
-        ax.set_yticks(np.arange(0, 1.1, 0.1))
-        ax.set_yticklabels([f'{x:.0%}' for x in np.arange(0, 1.1, 0.1)])
-        ax.legend()
-        ax.grid(axis='y', alpha=0.3)
-        
-        # Add value labels
-        for bars in [bars1, bars2]:
-            for bar in bars:
-                height = bar.get_height()
-                ax.text(bar.get_x() + bar.get_width()/2., height + 0.02,
-                       f'{height:.1%}', ha='center', va='bottom', fontsize=9)
-        
-        plt.tight_layout()
-        plt.savefig(plots_dir / f"comparison_zero_vs_few_3bin_{timestamp}.png", dpi=300, bbox_inches='tight')
-        plt.close()
-        print(f"3-bin comparison plot saved to: {plots_dir / f'comparison_zero_vs_few_3bin_{timestamp}.png'}")
 
 
 def main():
@@ -936,13 +797,6 @@ def main():
         type=str,
         default="config.yaml",
         help="Path to configuration file"
-    )
-    parser.add_argument(
-        "--mode",
-        type=str,
-        choices=["zero_shot", "few_shot", "both"],
-        default="both",
-        help="Prompting mode to use"
     )
     parser.add_argument(
         "--task",
@@ -956,43 +810,22 @@ def main():
     
     evaluator = GCSEvaluator(config_path=args.config)
     
-    results_zero = None
-    results_few = None
-    
-    if args.mode in ["zero_shot", "both"]:
-        print("\n" + "="*60)
-        print("ZERO-SHOT EVALUATION")
-        print("="*60)
-        results_zero = []
-        if args.task in ["6bin", "both"]:
-            results_zero_6 = evaluator.evaluate(use_few_shot=False, task="6bin")
-            evaluator.save_results(results_zero_6, use_few_shot=False, task="6bin")
-            results_zero.extend(results_zero_6)
-        if args.task in ["3bin", "both"]:
-            results_zero_3 = evaluator.evaluate(use_few_shot=False, task="3bin")
-            evaluator.save_results(results_zero_3, use_few_shot=False, task="3bin")
-            results_zero.extend(results_zero_3)
-    
-    if args.mode in ["few_shot", "both"]:
-        print("\n" + "="*60)
-        print("FEW-SHOT EVALUATION")
-        print("="*60)
-        results_few = []
-        if args.task in ["6bin", "both"]:
-            results_few_6 = evaluator.evaluate(use_few_shot=True, task="6bin")
-            evaluator.save_results(results_few_6, use_few_shot=True, task="6bin")
-            results_few.extend(results_few_6)
-        if args.task in ["3bin", "both"]:
-            results_few_3 = evaluator.evaluate(use_few_shot=True, task="3bin")
-            evaluator.save_results(results_few_3, use_few_shot=True, task="3bin")
-            results_few.extend(results_few_3)
-    
-    # Generate comparison plot if both modes were run
-    if args.mode == "both" and results_zero and results_few:
-        print("\n" + "="*60)
-        print("GENERATING COMPARISON PLOTS")
-        print("="*60)
-        evaluator.plot_comparison(results_zero, results_few)
+    generated_results: Dict[str, List[Dict]] = {}
+
+    if args.task in ["6bin", "both"]:
+        results_6 = evaluator.evaluate(task="6bin")
+        evaluator.save_results(results_6, task="6bin")
+        generated_results["6bin"] = results_6
+    if args.task in ["3bin", "both"]:
+        results_3 = evaluator.evaluate(task="3bin")
+        evaluator.save_results(results_3, task="3bin")
+        generated_results["3bin"] = results_3
+
+    if evaluator.config["evaluation"].get("generate_plots", False):
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        for task_name, results in generated_results.items():
+            metrics = evaluator._calculate_metrics(results, task_name)
+            evaluator._plot_results(results, metrics, timestamp=f"{timestamp}_{task_name}")
 
 
 if __name__ == "__main__":

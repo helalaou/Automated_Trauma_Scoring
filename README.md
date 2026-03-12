@@ -1,6 +1,6 @@
 # Glasgow Coma Scale VLM Evaluation
 
-This code evaluates various Vision Language Models (VLMs) on their ability to assess Glasgow Coma Scale motor responses from clinical images.
+This project evaluates Vision Language Models (VLMs) on Glasgow Coma Scale (GCS) motor scoring using OpenPose skeleton renderings derived from clinical images.
 
 ## Setup
 
@@ -22,22 +22,25 @@ pip install -r requirements.txt
    export OPENAI_API_KEY="your-api-key-here"
    ```
 
+3. Install OpenPose and make the binary accessible. Update `config.yaml` with the path if it is not discoverable on your `PATH`, and ensure the `models/` folder is available to the binary.
+
 ## Configuration
 
 All settings are configured in `config.yaml`:
 
-- **Models**: Configure which VLMs to evaluate and their parameters
-- **Prompts**: Jinja2 templates for both zero-shot and few-shot evaluation
-- **Dataset**: Paths and category mappings for the trauma dataset
-- **Evaluation**: Output directory and result saving options
+- **Models**: Configure which VLMs to evaluate and their parameters.
+- **Prompts**: Jinja2 templates for the OpenPose-driven zero-shot prompts.
+- **OpenPose**: Paths and drawing thresholds for skeleton generation.
+- **Dataset**: Paths and category mappings for the trauma dataset.
+- **Evaluation**: Output directory, logging, and plotting options.
 
 ### Key Configuration Sections
 
 - `models`: List of models to evaluate with their parameters (temperature, max_tokens, etc.)
-- `prompting.zero_shot_template`: Path to zero-shot Jinja2 template
-- `prompting.few_shot_template`: Path to few-shot Jinja2 template
-- `few_shot.examples_per_category`: Number of example images to include per category
-- `dataset.categories`: Mapping of dataset folders to GCS motor scores
+- `prompting.zero_shot_template`: Path to the OpenPose-driven 6-bin prompt.
+- `prompting.zero_shot_3bin_template`: Path to the OpenPose-driven 3-bin prompt.
+- `openpose`: Location of the OpenPose binary, output cache, and confidence thresholds.
+- `dataset.categories`: Mapping of dataset folders to GCS motor scores.
 
 ## Usage
 
@@ -47,53 +50,47 @@ All settings are configured in `config.yaml`:
 # 1) Install deps into a local virtualenv (.venv)
 ./install
 
-# 2) Run evaluation (defaults to --mode both and config.yaml)
+# 2) Run evaluation (defaults to 6-bin task and config.yaml)
 ./run
 
 # Examples
 # 6-bin standard (model predicts 1..6 directly)
-./run --mode zero_shot --task 6bin
-./run --mode few_shot --task 6bin
+./run --task 6bin
 
 # 3-bin simplified (model predicts 1..3 directly using dedicated 3-bin prompts)
-./run --mode zero_shot --task 3bin
-./run --mode few_shot --task 3bin
+./run --task 3bin
 
-# Run both tasks (6-bin and 3-bin) for both modes
-./run --mode both --task both
+# Run both tasks sequentially
+./run --task both
 ```
 
 Run the evaluation script directly (alternative):
 
 ```bash
-# Evaluate both zero-shot and few-shot (6-bin by default)
+# Evaluate 6-bin using OpenPose skeletons
 python evaluate_gcs.py
 
-# Evaluate only zero-shot 3-bin
-python evaluate_gcs.py --mode zero_shot --task 3bin
-
-# Evaluate only few-shot
-python evaluate_gcs.py --mode few_shot
+# Evaluate only the 3-bin task
+python evaluate_gcs.py --task 3bin
 
 # Use custom config file
-python evaluate_gcs.py --config custom_config.yaml --mode both --task both
+python evaluate_gcs.py --config custom_config.yaml --task both
 ```
 
 ## Results
 
 Results are saved in the `results/` directory:
 
-- `results_zero_shot_TIMESTAMP.json`: Individual zero-shot evaluation results
-- `summary_zero_shot_TIMESTAMP.json`: Zero-shot summary metrics
-- `results_few_shot_TIMESTAMP.json`: Individual few-shot evaluation results
-- `summary_few_shot_TIMESTAMP.json`: Few-shot summary metrics
-- `plots/`: Directory containing visualization plots
+- `results_openpose_6bin_TIMESTAMP.json`: Individual evaluation records for the 6-bin task.
+- `summary_openpose_6bin_TIMESTAMP.json`: Aggregated metrics for the 6-bin task.
+- `results_openpose_3bin_TIMESTAMP.json`: Individual evaluation records for the 3-bin task.
+- `summary_openpose_3bin_TIMESTAMP.json`: Aggregated metrics for the 3-bin task.
+- `plots/`: Directory containing visualization plots (if enabled).
 
 Each result includes:
-- Predicted GCS motor score
-- Confidence level
-- Reasoning
-- Accuracy metrics per model and category
+- Predicted GCS motor score (or bin) and derived accuracy flags.
+- Confidence, reasoning, and observed behavior text.
+- Pose metadata: OpenPose joint summary, cache locations, and fallback notes.
 
 ### Visualization Plots
 
@@ -103,7 +100,6 @@ The evaluation automatically generates several visualization plots (if `generate
 2. **Per-Category Accuracy** - Heatmap and grouped bar charts showing accuracy for each GCS category
 3. **Confusion Matrices** - One per model showing predicted vs expected scores
 4. **Confidence Distributions** - Histograms of confidence scores for each model
-5. **Zero-Shot vs Few-Shot Comparison** - Side-by-side comparison when both modes are evaluated
 
 All plots are saved as high-resolution PNG files (300 DPI) in `results/plots/`.
 
@@ -113,10 +109,7 @@ You can also plot results from previous evaluations using the standalone plottin
 
 ```bash
 # Plot a single summary file
-python plot_results.py --summary results/summary_zero_shot_TIMESTAMP.json
-
-# Compare zero-shot vs few-shot
-python plot_results.py --zero-summary results/summary_zero_shot_TIMESTAMP.json --few-summary results/summary_few_shot_TIMESTAMP.json
+python plot_results.py --summary results/summary_openpose_6bin_TIMESTAMP.json
 ```
 
 ## 6-bin vs 3-bin: What’s the difference?
