@@ -30,3 +30,12 @@ Thumbs.db
 
 results/
 logs/
+
+# OpenPose keypoint cache and skeleton renders (openpose.output_dir)
+pose_cache/
+
+# Tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
