@@ -1,0 +1,33 @@
+name: Bug report
+description: Something in the evaluation pipeline is not working as expected
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: A clear description of the problem.
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Command and configuration
+      description: The command you ran (e.g. `./run.sh --task 3bin`) and any changes to `config.yaml`. Do not paste API keys.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      placeholder: e.g. Python 3.11, OpenPose 1.7.0, Ubuntu 22.04
+  - type: textarea
+    id: logs
+    attributes:
+      label: Traceback or console output
+      render: text
