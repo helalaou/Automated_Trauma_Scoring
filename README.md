@@ -1,162 +1,266 @@
-# Glasgow Coma Scale VLM Evaluation
+<h1 align="center">Automated Trauma Scoring</h1>
 
-This project evaluates Vision Language Models (VLMs) on Glasgow Coma Scale (GCS) motor scoring using OpenPose skeleton renderings derived from clinical images.
+<p align="center">
+  Zero-shot Glasgow Coma Scale (GCS) motor-response scoring with vision-language models,<br />
+  using OpenPose skeletons instead of raw patient imagery.
+</p>
+
+<p align="center">
+  <img alt="Python 3.10+" src="https://img.shields.io/badge/python-3.10%2B-3776ab.svg" />
+  <img alt="Paper: TBD" src="https://img.shields.io/badge/paper-TBD-lightgrey.svg" />
+  <img alt="Pose: OpenPose BODY_25" src="https://img.shields.io/badge/pose-OpenPose%20BODY__25-2a78d6.svg" />
+  <img alt="Status: research code" src="https://img.shields.io/badge/status-research%20code-orange.svg" />
+</p>
+
+<p align="center">
+  <img src="docs/assets/pipeline.png" alt="Pipeline: input image, OpenPose keypoints, skeleton rendering and pose summary, zero-shot VLM prompt, scoring" width="880" />
+</p>
+
+> **Research use only.** This is not a medical device and must not be used for clinical
+> assessment or decision-making. See the [Disclaimer](#disclaimer).
+
+## Overview
+
+The motor component of the Glasgow Coma Scale (GCS-M) is one of the most informative parts of a
+trauma neurological exam, and it is judged largely from posture and limb movement. This repository
+asks a narrow question: **can a general-purpose vision-language model (VLM) assign the GCS motor
+score zero-shot, given only a body-pose representation of the patient?**
+
+For every labelled image the pipeline:
+
+1. runs [OpenPose](https://github.com/CMU-Perceptual-Computing-Lab/openpose) to extract BODY_25
+   keypoints,
+2. re-draws the pose as a colour-coded stick figure on a blank canvas and writes a short text
+   summary of where key joints are,
+3. sends the skeleton image and the summary to one or more OpenAI chat models with a Jinja2 prompt,
+4. parses the JSON answer and scores it against the folder label.
+
+The VLM sees a skeleton rather than the photograph, which removes appearance cues (faces, skin,
+clothing, setting) and forces the decision onto limb geometry. Two tasks are supported: the full
+**6-bin** GCS motor scale and a simplified **3-bin** grouping.
+
+## Task: GCS motor response classes
+
+Classes are defined in `config.yaml` (`dataset.categories`) and map one-to-one onto folders in
+`trauma_dataset/`.
+
+| GCS-M | Folder                | Response                                     | 3-bin group                   |
+| :---: | --------------------- | -------------------------------------------- | ----------------------------- |
+|   1   | `1_no_response`       | No response to painful stimuli               | 1 · Unresponsive / Abnormal   |
+|   2   | `2_extension`         | Abnormal extension (decerebrate posturing)   | 1 · Unresponsive / Abnormal   |
+|   3   | `3_abnormal_flexion`  | Abnormal flexion (decorticate posturing)     | 1 · Unresponsive / Abnormal   |
+|   4   | `4_normal_flexion`    | Withdrawal / flexion from pain               | 2 · Withdraws / Localizes     |
+|   5   | `5_localizing`        | Localizes to pain                            | 2 · Withdraws / Localizes     |
+|   6   | `6_obeys_commands`    | Obeys commands                               | 3 · Obeys Commands / Normal   |
+
+**6-bin vs 3-bin**
+
+- `--task 6bin` uses `prompts/zero_shot_gcs.j2`. The model returns `gcs_motor_score` (1–6). A
+  3-bin score is also *derived* from that prediction with the mapping above (1–3 → 1, 4–5 → 2,
+  6 → 3), so both accuracies are reported.
+- `--task 3bin` uses `prompts/zero_shot_gcs_3bin.j2`. The model returns `gcs_motor_bin` (1–3)
+  directly; this is the model's own 3-way decision, not a conversion. 6-bin accuracy is not
+  computed for this task and is reported as N/A.
+
+## Method
+
+| Stage | What happens | Where |
+| ----- | ------------ | ----- |
+| **Pose extraction** | OpenPose is run on each image with `--write_json` and rendering disabled. Keypoint JSON is cached under `pose_cache/json/` and reused when `openpose.reuse_cache` is true. Only the **first person** OpenPose reports (`people[0]`) is used. | `pose_processor.py` |
+| **Skeleton rendering** | BODY_25 limbs and joints with confidence ≥ `openpose.min_confidence` are drawn on a white canvas the size of the original image: left-side limbs blue, right-side limbs red, midline dark grey. Renders are saved under `pose_cache/renders/`. | `pose_processor.py` |
+| **Pose summary** | Eight landmarks (neck, mid-hip, both wrists, knees and ankles) are each placed in a 3×3 grid (`left/center/right` × `upper/mid/lower`) with their confidence, plus a count of joints above threshold. This text is injected into the prompt as `{{ pose_summary }}`. | `pose_processor.py` |
+| **Prompting** | The rendered Jinja2 prompt and the skeleton image (as a base64 data URL, `prompting.image_detail`) are sent via the OpenAI Chat Completions API to every model in `config.yaml`. The prompt asks for a JSON object with the score, `confidence`, `reasoning` and `observed_behaviors`. | `evaluate_gcs.py`, `prompts/` |
+| **Fallback** | If OpenPose fails for an image, the **raw image** is sent instead and the record carries a `pose_error` field. | `evaluate_gcs.py` |
+| **Scoring** | Responses are parsed (code fences stripped), compared to the folder label, and aggregated into overall, per-class and per-3-bin-group accuracy plus token usage. | `evaluate_gcs.py` |
+
+Models are listed under `models:` in `config.yaml`. The committed configuration evaluates
+`gpt-4.1-2025-04-14`; several GPT-5-family entries are present but commented out. For model names
+starting with `gpt-5`, `temperature` is dropped and `max_tokens` is renamed to
+`max_completion_tokens`.
+
+## Dataset
+
+`trauma_dataset/` contains **33 still frames** sorted by GCS motor score:
+
+<p align="center">
+  <img src="docs/assets/dataset_distribution.png" alt="Images per class: 8 no response, 8 extension, 7 abnormal flexion, 6 withdrawal, 2 localizes, 2 obeys commands" width="640" />
+</p>
+
+The classes are imbalanced (2 images each for scores 5 and 6), so per-class accuracies for those
+classes rest on very few samples.
+
+**Provenance:** _TBD — source and licence of the images to be documented._
+
+### Structure
+
+```
+trauma_dataset/
+├── 1_no_response/
+├── 2_extension/
+├── 3_abnormal_flexion/
+├── 4_normal_flexion/
+├── 5_localizing/
+└── 6_obeys_commands/
+```
+
+### Adding data
+
+- Drop `.png`, `.jpg` or `.jpeg` files into the folder for their GCS motor score. The label comes
+  from the folder; file names are not parsed.
+- To add or rename a class, edit `dataset.categories` in `config.yaml` (`name` must match the
+  folder, `gcs_motor_score` is the label).
+- To use a dataset elsewhere, set `dataset.base_path`.
+- Pose caches are keyed by the image's path relative to the dataset root, so replacing an image
+  under the same name requires deleting its entry in `pose_cache/` (or setting
+  `openpose.reuse_cache: false`).
+- Only add images you are allowed to redistribute. Do not add images of real patients.
 
 ## Setup
 
-1. Install dependencies:
+**Requirements:** Python 3.10+, an OpenAI API key, and a working
+[OpenPose](https://github.com/CMU-Perceptual-Computing-Lab/openpose) build with its BODY_25 model.
+
 ```bash
-pip install -r requirements.txt
+git clone https://github.com/helalaou/Automated_Trauma_Scoring.git
+cd Automated_Trauma_Scoring
+
+# Python environment: creates .venv/ and installs requirements.txt
+./install.sh
+source .venv/bin/activate
+
+# API key
+cp .env.example .env    # then set OPENAI_API_KEY in .env
 ```
 
-2. Set your OpenAI API key. You can either:
+The key can also be exported directly (`export OPENAI_API_KEY=...`). `evaluate_gcs.py` loads `.env`
+automatically through `python-dotenv`.
 
-   **Option A: Use a .env file (recommended)**
-   Create a `.env` file in the project root:
-   ```bash
-   OPENAI_API_KEY=your-api-key-here
-   ```
-   
-   **Option B: Set as environment variable**
-   ```bash
-   export OPENAI_API_KEY="your-api-key-here"
-   ```
-
-3. Install OpenPose and make the binary accessible. Update `config.yaml` with the path if it is not discoverable on your `PATH`, and ensure the `models/` folder is available to the binary.
+**OpenPose** is not installed by `install.sh`. Build it following the upstream instructions, then
+either put the binary on your `PATH` (the code looks for `openpose.bin`, `OpenPoseDemo.app` or
+`openpose`) or set `openpose.binary_path` in `config.yaml`. If your build cannot find its models,
+set `openpose.model_folder`. The evaluation refuses to start if no OpenPose binary is configured.
 
 ## Configuration
 
-All settings are configured in `config.yaml`:
+All settings live in `config.yaml`. Values of the form `${VAR}` are read from the environment.
 
-- **Models**: Configure which VLMs to evaluate and their parameters.
-- **Prompts**: Jinja2 templates for the OpenPose-driven zero-shot prompts.
-- **OpenPose**: Paths and drawing thresholds for skeleton generation.
-- **Dataset**: Paths and category mappings for the trauma dataset.
-- **Evaluation**: Output directory, logging, and plotting options.
+| Key | Default | Meaning |
+| --- | ------- | ------- |
+| `openai.api_key` | `${OPENAI_API_KEY}` | API key, taken from the environment or `.env`. |
+| `openai.base_url` | `null` | Optional alternative endpoint for an OpenAI-compatible API. |
+| `openai.timeout` | `60` | Request timeout in seconds. |
+| `models[].name` / `models[].parameters` | `gpt-4.1-2025-04-14`, `top_p: 1.0` | Models to evaluate and the parameters passed to the API. |
+| `dataset.base_path` | `trauma_dataset` | Dataset root. |
+| `dataset.categories` | 6 classes | Folder name, GCS motor score and description for each class. |
+| `prompting.zero_shot_template` | `prompts/zero_shot_gcs.j2` | 6-bin prompt. |
+| `prompting.zero_shot_3bin_template` | `prompts/zero_shot_gcs_3bin.j2` | 3-bin prompt. |
+| `prompting.image_detail` | `high` | Image detail level sent to the API (`low`, `high`, `auto`). |
+| `openpose.binary_path` | `null` | OpenPose executable; `null` searches `PATH`. |
+| `openpose.model_folder` | `null` | Passed to OpenPose as `--model_folder` when set. |
+| `openpose.output_dir` | `pose_cache` | Where keypoint JSON and skeleton renders are written. |
+| `openpose.reuse_cache` | `true` | Skip OpenPose when cached keypoints exist. |
+| `openpose.min_confidence` | `0.2` | Joints below this confidence are not drawn or summarised. |
+| `openpose.strict` | `true` | `true`: OpenPose errors or missing keypoint files raise, which triggers the raw-image fallback. `false`: they are ignored and an empty skeleton is sent. |
+| `evaluation.output_dir` | `results` | Where result and summary JSON files are written. |
+| `evaluation.save_individual_responses` | `true` | Write per-image, per-model records. |
+| `evaluation.save_summary` | `true` | Write aggregated metrics and print them. |
+| `evaluation.generate_plots` | `true` | Write plots to `results/plots/` after the run. |
+| `evaluation.logging.*` | enabled, `logs/` | JSONL log of every request and response; base64 images can be redacted and responses truncated. |
 
-### Key Configuration Sections
-
-- `models`: List of models to evaluate with their parameters (temperature, max_tokens, etc.)
-- `prompting.zero_shot_template`: Path to the OpenPose-driven 6-bin prompt.
-- `prompting.zero_shot_3bin_template`: Path to the OpenPose-driven 3-bin prompt.
-- `openpose`: Location of the OpenPose binary, output cache, and confidence thresholds.
-- `dataset.categories`: Mapping of dataset folders to GCS motor scores.
-
-## Usage
-
-### Quick start
+## Running
 
 ```bash
-# 1) Install deps into a local virtualenv (.venv)
-./install
+# 6-bin task with config.yaml (default)
+./run.sh
 
-# 2) Run evaluation (defaults to 6-bin task and config.yaml)
-./run
+# Choose the task: 6bin | 3bin | both
+./run.sh --task 3bin
+./run.sh --config my_config.yaml --task both
 
-# Examples
-# 6-bin standard (model predicts 1..6 directly)
-./run --task 6bin
+# Or set defaults through the environment
+TASK=both CONFIG=config.yaml ./run.sh
 
-# 3-bin simplified (model predicts 1..3 directly using dedicated 3-bin prompts)
-./run --task 3bin
-
-# Run both tasks sequentially
-./run --task both
+# Equivalent direct call
+python evaluate_gcs.py --config config.yaml --task 6bin
 ```
 
-Run the evaluation script directly (alternative):
+`run.sh` activates `.venv/` if present. With no arguments it uses `TASK` (default `6bin`),
+`CONFIG` (default `config.yaml`) and `PYTHON` (default `python3`); with arguments it forwards them
+unchanged to `evaluate_gcs.py`.
+
+Each run calls the OpenAI API once per image per model, so a full 6-bin pass over the bundled
+dataset is 33 requests per model.
+
+### Outputs
+
+| Path | Contents |
+| ---- | -------- |
+| `results/results_openpose_<task>_<timestamp>.json` | One record per image and model: label, prediction(s), correctness flags, confidence, reasoning, observed behaviours, raw response, token usage and pose metadata. |
+| `results/summary_openpose_<task>_<timestamp>.json` | `timestamp`, `mode`, `total_images` and per-model `metrics` (6-bin and 3-bin accuracy, per-class and per-group accuracy, total tokens). The task is encoded in the file name. |
+| `results/plots/` | Overall accuracy bar chart, per-class accuracy heatmap and grouped bars, and a confusion matrix per model. |
+| `logs/llm_interactions_<timestamp>.jsonl` | Request, response and parsed-answer log. |
+| `pose_cache/json/`, `pose_cache/renders/` | OpenPose keypoints and the skeleton images that were sent to the model. |
+
+All of these are git-ignored.
+
+To re-plot overall accuracy from an existing summary:
 
 ```bash
-# Evaluate 6-bin using OpenPose skeletons
-python evaluate_gcs.py
-
-# Evaluate only the 3-bin task
-python evaluate_gcs.py --task 3bin
-
-# Use custom config file
-python evaluate_gcs.py --config custom_config.yaml --task both
+python plot_results.py --summary results/summary_openpose_6bin_<timestamp>.json
 ```
 
 ## Results
 
-Results are saved in the `results/` directory:
+_TBD._ No result or summary files are committed to this repository (`results/` and `*.json` are
+git-ignored), so no numbers are reported here yet. Run the evaluation as above to reproduce them;
+the summary is printed to the console and saved under `results/`.
 
-- `results_openpose_6bin_TIMESTAMP.json`: Individual evaluation records for the 6-bin task.
-- `summary_openpose_6bin_TIMESTAMP.json`: Aggregated metrics for the 6-bin task.
-- `results_openpose_3bin_TIMESTAMP.json`: Individual evaluation records for the 3-bin task.
-- `summary_openpose_3bin_TIMESTAMP.json`: Aggregated metrics for the 3-bin task.
-- `plots/`: Directory containing visualization plots (if enabled).
+## Repository structure
 
-Each result includes:
-- Predicted GCS motor score (or bin) and derived accuracy flags.
-- Confidence, reasoning, and observed behavior text.
-- Pose metadata: OpenPose joint summary, cache locations, and fallback notes.
-
-### Visualization Plots
-
-The evaluation automatically generates several visualization plots (if `generate_plots: true` in config):
-
-1. **Overall Accuracy** - Bar charts comparing accuracy and confidence across models
-2. **Per-Category Accuracy** - Heatmap and grouped bar charts showing accuracy for each GCS category
-3. **Confusion Matrices** - One per model showing predicted vs expected scores
-4. **Confidence Distributions** - Histograms of confidence scores for each model
-
-All plots are saved as high-resolution PNG files (300 DPI) in `results/plots/`.
-
-### Plotting Existing Results
-
-You can also plot results from previous evaluations using the standalone plotting script:
-
-```bash
-# Plot a single summary file
-python plot_results.py --summary results/summary_openpose_6bin_TIMESTAMP.json
+```
+.
+├── evaluate_gcs.py            # Evaluation entry point: prompting, parsing, metrics, plots
+├── pose_processor.py          # OpenPose runner, skeleton renderer and pose summariser
+├── plot_results.py            # Re-plot overall accuracy from a saved summary
+├── config.yaml                # Models, dataset classes, prompts, OpenPose and output settings
+├── prompts/
+│   ├── zero_shot_gcs.j2       # 6-bin prompt
+│   └── zero_shot_gcs_3bin.j2  # 3-bin prompt
+├── trauma_dataset/            # Labelled images, one folder per GCS motor score
+├── docs/assets/               # README figures
+├── install.sh                 # Create .venv/ and install requirements
+├── run.sh                     # Convenience wrapper around evaluate_gcs.py
+├── requirements.txt
+├── .env.example
+└── CITATION.cff
 ```
 
-## 6-bin vs 3-bin: What’s the difference?
+## Citation
 
-- 6-bin task (`--task 6bin`):
-  - The model is prompted with the full 6-level Glasgow motor response scale.
-  - The model returns `gcs_motor_score` in 1..6.
-  - We also compute a derived 3-bin score from that 6-bin prediction for convenience:
-    - 1–3 → Bin 1 (Unresponsive/Abnormal)
-    - 4–5 → Bin 2 (Withdraws/Localizes)
-    - 6 → Bin 3 (Obeys Commands/Normal)
+A paper describing this work is in preparation. Until then, please cite the software (see
+[`CITATION.cff`](CITATION.cff)):
 
-- 3-bin task (`--task 3bin`):
-  - The model is prompted with a dedicated 3-bin prompt and returns `gcs_motor_bin` in 1..3 directly.
-  - This is NOT converted from 6-bin; it’s the model’s native 3-bin decision.
-
-Console output rules:
-- In 6-bin runs, you will see only the 6-bin result.
-- In 3-bin runs, you will see only the 3-bin result.
-- This avoids confusion (e.g., seeing 6-bin values while running a 3-bin prompt).
-
-Summary files include both systems’ metrics so you can compare:
-- 6-bin: accuracy per model and per category
-- 3-bin: accuracy per model and per 3-bin group
-
-How summaries are labeled (to avoid confusion):
-- When `--task 6bin` is used:
-  - 6-bin Accuracy: reported normally.
-  - 3-bin Accuracy (derived from 6-bin): shown as a mapping from the 6-bin predictions (1–3→1, 4–5→2, 6→3).
-- When `--task 3bin` is used:
-  - 6-bin Accuracy: N/A (not evaluated for 3-bin prompt).
-  - 3-bin Accuracy (direct): reported from the model’s `gcs_motor_bin` output.
-
-The saved summary JSON also records the run `task` so you can tell whether 3-bin metrics are direct or derived when analyzing results offline.
-
-## Dataset Structure
-
-The trauma dataset should be organized as:
-```
-trauma_dataset/
-  ├── 1_no_response/
-  ├── 2_extension/
-  ├── 3_abnormal_flexion/
-  ├── 4_normal_flexion/
-  ├── 5_localizing/
-  └── 6_obeys_commands/
+```bibtex
+@misc{elalaoui_automated_trauma_scoring,
+  title        = {Automated Trauma Scoring: Zero-shot Glasgow Coma Scale Motor Scoring with Vision-Language Models},
+  author       = {El Alaoui, Hamza},
+  year         = {TBD},
+  howpublished = {\url{https://github.com/helalaou/Automated_Trauma_Scoring}},
+  note         = {Carnegie Mellon University. Paper: TBD}
+}
 ```
 
-Each folder contains images (PNG, JPG) representing that GCS motor score category.
+## License
 
+This repository does not currently include a license. Until one is added, all rights are reserved
+by the author.
+
+## Disclaimer
+
+This software is a research prototype for studying how vision-language models reason about
+posture. It is **not a medical device**, has not been clinically validated, and **must not be used
+for diagnosis, triage, or any clinical decision**. Outputs can be wrong with high stated
+confidence. Always assess the Glasgow Coma Scale in person according to your clinical protocols.
+
+When OpenPose fails on an image, the original image is sent to a third-party API. Do not run this
+pipeline on images of real patients or any protected health information.
