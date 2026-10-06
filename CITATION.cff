@@ -1,0 +1,16 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below. A paper citation will be added once it is available."
+type: software
+title: "Automated Trauma Scoring: Zero-shot Glasgow Coma Scale motor scoring with vision-language models"
+authors:
+  - family-names: "El Alaoui"
+    given-names: "Hamza"
+    affiliation: "Carnegie Mellon University"
+repository-code: "https://github.com/helalaou/Automated_Trauma_Scoring"
+keywords:
+  - Glasgow Coma Scale
+  - vision-language models
+  - pose estimation
+  - OpenPose
+  - trauma assessment
+  - zero-shot evaluation
